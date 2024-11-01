@@ -1,0 +1,140 @@
+---
+title: "Bulk RNA Seq - Persister (treatments vs control)"
+output: html_document
+date: "2024-11-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Library}
+library(DESeq2) 
+library(apeglm) 
+library(ggplot2)
+library(fgsea)
+library(msigdbr)
+library(org.Hs.eg.db) 
+library(clusterProfiler) 
+library(EnhancedVolcano)
+```
+
+```{r DEG}
+raw<-read.delim("E:/Genome Center Files/GEO_BulkRNA_CDK46I_CDK7I_TNBC/est_counts_genes_kallisto.txt", header=TRUE, row.names=1)
+
+countmatrix<-as.matrix(cbind(raw[1],raw[8], raw[2], raw[6],raw[3],raw[7], raw[5], raw[4]))
+#
+coldata <- DataFrame(group=factor(c("cont","cont","palbo","palbo","sy","sy","combi","combi")),rep=factor(c("batch1","batch2","batch1","batch3","batch3","batch2","batch1","batch2")))
+coldata$group <- relevel(coldata$group, ref = "cont")
+dds <- DESeqDataSetFromMatrix(countData = countmatrix,
+                              colData = coldata, 
+                              design = ~ rep + group)
+dds_all<-dds
+dds <- DESeq(dds)
+
+res_combivscont <-  lfcShrink(dds, coef="group_combi_vs_cont", type="apeglm")
+res_combivscont<-na.omit(res_combivscont)
+```
+
+```{r GSEA}
+DEG_list <-   list(res_combivscont)
+results <- list()
+prepare_gene_list <- function(DEG) {
+  DEG_list <- DEG[order(-DEG$log2FoldChange),]
+  entrez_id <- mapIds(org.Hs.eg.db, keys=rownames(DEG_list), column="ENTREZID", keytype="SYMBOL")
+  entrez_id <- entrez_id[!is.na(entrez_id)]
+  DEG_list <- DEG_list[rownames(DEG_list) %in% names(entrez_id), ]
+  rownames(DEG_list) <- entrez_id
+  geneList <- DEG_list$log2FoldChange
+  names(geneList) <- rownames(DEG_list)
+  geneList <- na.omit(geneList)
+  return(geneList)
+}
+hallmark_genesets <- msigdbr(species = "human", category = "H")
+hallmark_list <- hallmark_genesets %>%dplyr::select(gs_name, entrez_gene, gene_symbol)
+
+for (i in seq_along(DEG_list)) {
+  geneList <- prepare_gene_list(DEG_list[[i]])
+  set.seed(i)
+  results[[i]] <- GSEA(geneList,
+                       TERM2GENE = hallmark_list[,c("gs_name", "entrez_gene")],
+                       pvalueCutoff = 0.05, 
+                       minGSSize = 15,
+                       maxGSSize = 500,
+                       nPerm = 10000)
+}
+```
+
+```{r GSEA Dotplot}
+pathways_to_select<-c(
+"HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+"HALLMARK_INFLAMMATORY_RESPONSE",
+"HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+"HALLMARK_INTERFERON_ALPHA_RESPONSE",
+"HALLMARK_INTERFERON_GAMMA_RESPONSE",
+"HALLMARK_APOPTOSIS",
+"HALLMARK_P53_PATHWAY",
+"HALLMARK_DNA_REPAIR",
+"HALLMARK_E2F_TARGETS",
+"HALLMARK_MYC_TARGETS_V1",
+"HALLMARK_G2M_CHECKPOINT"
+)
+
+p1<-dotplot(results[[1]], showCategory = pathways_to_select, title = "" , split=".sign") + facet_grid(.~.sign)
+
+###
+pdf("C:/Users/es4218/OneDrive - Columbia University Irving Medical Center/1-5. CDK4i+CDK7i bresat cancer/RNA Seq/RNA Seq - TNBC CDK46i, CDK7i Persister/dotplot.pdf", width = 6, height = 6)
+p1
+dev.off()
+```
+
+```{r heatmap}
+msigdbr_df <- msigdbr(species = "human", category = "H")
+
+dds<-dds_all
+vsd <- vst(dds, blind=FALSE)
+vsd1 <- vsd
+mat1 <- assay(vsd1)
+mm1 <- model.matrix(~group, colData(vsd1))
+mat1 <- limma::removeBatchEffect(mat1, batch=vsd1$rep, design=mm1)
+assay(vsd1) <- mat1
+
+genes <- msigdbr_df %>%
+  dplyr::filter(gs_id == "M5925") %>%
+  dplyr::select(gene_symbol)
+vsd_subset <- mat1[rownames(mat1) %in% genes$gene_symbol,]
+vsd.scale<- t(apply(vsd_subset, 1, scale)) #scale() transforms it to Z-scale
+col.names<-data.frame(Condition=colData(vsd)$group) 
+colnames(vsd.scale)<- colnames(vsd_subset)
+rownames(col.names)<-colnames(dds)
+
+color <- colorRampPalette((c("green", "black", "red")))(100)
+library(ComplexHeatmap)
+col.names$Condition <- factor(col.names$Condition, levels = c("cont", "sy", "palbo", "combi"))
+anno_colors <- list(Condition = c("cont" = "grey", "palbo" = "green", "sy" = "blue", "combi" = "red"))
+col_means<-colMeans(vsd.scale)
+column_ha <- HeatmapAnnotation(
+  mean = anno_barplot(col_means, height = unit(2, "cm")),
+  treatment = col.names$Condition,
+  col = list(treatment = anno_colors$Condition)
+)
+vsd.scale<-na.omit(vsd.scale)
+p2<-Heatmap(
+  vsd.scale,
+  name = "z-score",
+  top_annotation = column_ha,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  cluster_columns = TRUE,
+  cluster_rows = TRUE,
+  col = colorRampPalette((c(rgb(0, 0, 255, maxColorValue = 255), "white", rgb(249, 64, 64, maxColorValue = 255))))(100),
+  border = FALSE
+)
+###
+pdf("C:/Users/es4218/OneDrive - Columbia University Irving Medical Center/1-5. CDK4i+CDK7i bresat cancer/RNA Seq/RNA Seq - TNBC CDK46i, CDK7i Persister/heatmap.pdf", width = 6, height = 6)
+p2
+dev.off()
+```
+
+
+
